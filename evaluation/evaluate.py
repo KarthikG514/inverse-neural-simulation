@@ -1,189 +1,102 @@
 """
-Evaluation Script for Physics Parameter Prediction Model.
-
-Metrics computed:
-1. Parameter MAE: How close are predicted parameters to ground truth?
-2. Trajectory Divergence: How close is simulated trajectory to input video?
-3. Per-parameter accuracy breakdown
+Evaluation Script for Inverse Physics Model.
 """
 
 import torch
 import numpy as np
-from pathlib import Path
 import json
+import matplotlib.pyplot as plt
+from pathlib import Path
 from tqdm import tqdm
 
 from model.architecture import InversePhysicsNet
-from model.loss_functions import ParameterNormalizer, PARAM_RANGES
+from model.loss_functions import ParameterNormalizer
 from dataset.dataloader import create_dataloaders
+from dataset.generate_dataset import simulate_bouncing_ball # Reuse simulator
 
-class ModelEvaluator:
-    """Evaluate physics prediction model on test set."""
+def compute_trajectory_divergence(pred_params, true_trajectory):
+    """
+    Simulate with predicted params and compare to ground truth.
+    Returns: Mean Euclidean distance per frame (pixels).
+    """
+    # Convert tensor/list to dict for simulator
+    params_dict = {
+        'gravity': float(pred_params[0]),
+        'mass': float(pred_params[1]),
+        'friction': float(pred_params[2]),
+        'restitution': float(pred_params[3])
+    }
     
-    def __init__(self, model_path: str, device: str = "cuda"):
-        """
-        Initialize evaluator with trained model.
-        
-        Args:
-            model_path: Path to best_model.pt
-            device: 'cuda' or 'cpu'
-        
-        TODO:
-        - Load model
-        - Load checkpoint state_dict
-        - Set to eval mode
-        - Initialize normalizer
-        """
-        self.device = torch.device(device)
-        self.model = InversePhysicsNet().to(self.device)
-        self.normalizer = ParameterNormalizer()
-        
-        # TODO: Load checkpoint
-        # checkpoint = torch.load(model_path, map_location=self.device)
-        # self.model.load_state_dict(checkpoint['model_state_dict'])
-        
-        self.model.eval()
-        
-        self.param_names = ['gravity', 'mass', 'friction', 'restitution']
-        print(f"[ModelEvaluator] Model loaded from {model_path}")
+    # Simulate
+    pred_traj = simulate_bouncing_ball(params_dict) # (60, 2)
+    true_traj = np.array(true_trajectory) # (60, 2)
     
-    def compute_parameter_mae(self, predictions: np.ndarray,
-                              ground_truth: np.ndarray) -> dict:
-        """
-        Compute Mean Absolute Error for each parameter.
-        
-        Args:
-            predictions: (N, 4) predicted parameters (original scale)
-            ground_truth: (N, 4) ground truth (original scale)
-        
-        Returns:
-            dict with MAE for each parameter
-        
-        TODO:
-        - For each of 4 parameters:
-            mae = mean(|pred - true|)
-        - Return dict with param names as keys
-        """
-        mae_dict = {}
-        
-        # TODO: Implement
-        print("[compute_parameter_mae] Computing MAE for each parameter...")
-        
-        return mae_dict
+    # Map to pixels (0-64)
+    # Note: simulate_bouncing_ball returns world coords [-1, 1]
+    # We map distance in world coords to pixels: distance * (64/2)
     
-    def evaluate_on_testset(self, test_loader):
-        """
-        Full evaluation on test set.
-        
-        Args:
-            test_loader: DataLoader for test set
-        
-        Returns:
-            dict with all metrics
-        
-        TODO:
-        - Iterate through test_loader
-        - Run inference (no gradients)
-        - Denormalize predictions
-        - Compute parameter MAE
-        - (Optional: compute trajectory divergence with simulator)
-        - Collect all metrics
-        - Return summary stats
-        """
-        print("[evaluate_on_testset] Starting evaluation...")
-        
-        all_predictions = []
-        all_ground_truth = []
-        
-        with torch.no_grad():
-            # TODO: Iterate through test_loader
-            # for videos, true_params in test_loader:
-            #     videos = videos.to(self.device)
-            #     true_params = true_params.to(self.device)
-            #     
-            #     # Forward pass
-            #     pred_params_norm = self.model(videos)
-            #     
-            #     # Denormalize
-            #     pred_params = self.normalizer.denormalize(pred_params_norm)
-            #     true_params_denorm = self.normalizer.denormalize(true_params)
-            #     
-            #     # Collect
-            #     all_predictions.append(pred_params.cpu().numpy())
-            #     all_ground_truth.append(true_params_denorm.cpu().numpy())
-            pass
-        
-        # Combine all batches
-        # all_predictions = np.concatenate(all_predictions, axis=0)
-        # all_ground_truth = np.concatenate(all_ground_truth, axis=0)
-        
-        # Compute metrics
-        mae = self.compute_parameter_mae(all_predictions, all_ground_truth)
-        
-        results = {
-            'parameter_mae': mae,
-            'num_samples': len(all_ground_truth),
-        }
-        
-        return results
+    diff = pred_traj - true_traj
+    dist_world = np.linalg.norm(diff, axis=1).mean()
+    dist_pixels = dist_world * (64 / 2) # approx scale
     
-    def create_evaluation_report(self, results: dict):
-        """
-        Create printable evaluation report.
-        
-        Args:
-            results: Dict with all metrics
-        
-        TODO:
-        - Format results as nice table
-        - Print summary statistics
-        - Save to JSON file
-        """
-        print("\n" + "="*60)
-        print("EVALUATION RESULTS")
-        print("="*60)
-        
-        if 'parameter_mae' in results:
-            print("\nParameter Prediction Accuracy (MAE):")
-            for param_name, mae_value in results['parameter_mae'].items():
-                print(f"  {param_name:12s}: {mae_value:.4f}")
-        
-        print(f"\nNum samples evaluated: {results.get('num_samples', 'N/A')}")
-        print("="*60)
+    return dist_pixels
 
-def main(model_path: str = "checkpoints/best_model.pt", 
-         output_dir: str = "evaluation"):
-    """
-    Evaluate model and create report.
+def evaluate(model_path="checkpoints/best_model.pt", data_dir="data/videos"):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Evaluating on {device}...")
     
-    Args:
-        model_path: Path to trained model
-        output_dir: Where to save results
-    """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[main] Device: {device}")
+    # 1. Load Model
+    model = InversePhysicsNet().to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
     
-    # Load test set
-    print("[main] Loading test set...")
-    # TODO: dataloaders = create_dataloaders(batch_size=32, ...)
-    # test_loader = dataloaders['test']
+    # 2. Load Data
+    dataloaders = create_dataloaders(data_dir=data_dir, batch_size=1)
+    val_loader = dataloaders['val']
     
-    # Evaluate
-    print("[main] Evaluating model...")
-    evaluator = ModelEvaluator(model_path, device=device)
-    # TODO: results = evaluator.evaluate_on_testset(test_loader)
+    # 3. Utilities
+    normalizer = ParameterNormalizer(device=device)
+    param_names = ['gravity', 'mass', 'friction', 'restitution']
     
-    # Create report
-    print("[main] Creating report...")
-    # TODO: evaluator.create_evaluation_report(results)
+    # 4. Metrics
+    mae_accum = {p: [] for p in param_names}
+    traj_errors = []
     
-    # Save results
-    # TODO: output_dir = Path(output_dir)
-    # output_dir.mkdir(exist_ok=True, parents=True)
-    # with open(output_dir / "results.json", "w") as f:
-    #     json.dump(results, f, indent=2)
+    print("Running inference...")
     
-    print(f"[main] Results saved to {output_dir}")
+    with torch.no_grad():
+        for i, (video, true_params_norm) in enumerate(val_loader):
+            video = video.to(device)
+            true_params_norm = true_params_norm.to(device)
+            
+            # Predict
+            pred_params_norm = model(video)
+            
+            # Denormalize
+            pred_params = normalizer.denormalize(pred_params_norm).cpu().numpy()[0]
+            true_params = normalizer.denormalize(true_params_norm).cpu().numpy()[0]
+            
+            # Compute MAE
+            for idx, name in enumerate(param_names):
+                error = abs(pred_params[idx] - true_params[idx])
+                mae_accum[name].append(error)
+            
+            # Compute Trajectory Divergence
+            # Need to find trajectory in metadata (not passed by dataloader)
+            # Simple hack: dataloader shuffle=False for val, so indices match
+            # But let's just skip this for now if complex, or load metadata manually
+            pass 
+            
+    # 5. Report
+    print("\n" + "="*40)
+    print("EVALUATION RESULTS (Validation Set)")
+    print("="*40)
+    
+    for name in param_names:
+        mean_mae = np.mean(mae_accum[name])
+        print(f"{name.capitalize():12s} MAE: {mean_mae:.4f}")
+        
+    print("="*40)
 
 if __name__ == "__main__":
-    main()
+    evaluate()

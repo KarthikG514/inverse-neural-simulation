@@ -1,12 +1,5 @@
 """
 PyTorch DataLoader for Inverse Physics Dataset.
-
-Features:
-- Load MP4 videos from disk
-- Normalize video pixels to [0, 1]
-- Normalize physics parameters to [0, 1]
-- Create train/val/test splits
-- Return batches with proper tensor shapes
 """
 
 import torch
@@ -15,168 +8,115 @@ import cv2
 import json
 import numpy as np
 from pathlib import Path
-from typing import Dict, Tuple, Optional
-
-# Parameter ranges (MUST match loss_functions.py)
-PARAM_RANGES = {
-    'gravity': (5.0, 15.0),
-    'mass': (0.5, 5.0),
-    'friction': (0.0, 1.0),
-    'restitution': (0.3, 1.0),
-}
+from typing import Dict, List
 
 class InversePhysicsDataset(Dataset):
-    """
-    PyTorch Dataset for physics parameter prediction from video.
+    """Dataset for physics parameter prediction from video."""
     
-    Loads videos and returns normalized tensors.
-    """
-    
-    def __init__(self, video_dir: str, metadata_path: str,
-                 split: str = 'train', train_ratio: float = 0.8,
-                 val_ratio: float = 0.1):
+    def __init__(self, video_dir: str, metadata_path: str):
         """
-        Initialize dataset.
-        
         Args:
             video_dir: Path to videos folder
             metadata_path: Path to metadata.json
-            split: 'train', 'val', or 'test'
-            train_ratio: Fraction for training (0.8)
-            val_ratio: Fraction for validation (0.1)
-        
-        TODO:
-        - Load metadata.json
-        - Split indices into train/val/test
-        - Store paths and parameters
         """
         self.video_dir = Path(video_dir)
-        self.split = split
         
-        # TODO: Load metadata
-        # with open(metadata_path) as f:
-        #     self.metadata = json.load(f)
+        # Load metadata
+        with open(metadata_path, 'r') as f:
+            self.metadata = json.load(f)
+            
+        print(f"[Dataset] Loaded {len(self.metadata)} samples from {metadata_path}")
         
-        print(f"[InversePhysicsDataset] Initialized {split} split")
+        self.param_names = ['gravity', 'mass', 'friction', 'restitution']
     
     def __len__(self) -> int:
-        """Return number of samples in this split."""
-        # TODO: Return length of data in current split
-        pass
+        return len(self.metadata)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Load one sample.
+    def __getitem__(self, idx: int):
+        item = self.metadata[idx]
         
-        Returns:
-            (video_tensor, param_tensor)
-            video_tensor: (1, 60, 64, 64) normalized to [0, 1]
-            param_tensor: (4,) normalized to [0, 1]
+        # 1. Load Video
+        # Handle path differences (Windows vs Linux)
+        video_filename = Path(item['video_path']).name
+        video_path = self.video_dir / video_filename
         
-        TODO:
-        - Load video from MP4
-        - Resize to 64×64
-        - Normalize to [0, 1]
-        - Load parameters from metadata
-        - Normalize parameters to [0, 1]
-        - Return as torch tensors
-        """
-        pass
+        video_tensor = self.load_video(str(video_path))
+        
+        # 2. Load Parameters
+        params = item['params']
+        param_tensor = torch.tensor([
+            params[p] for p in self.param_names
+        ], dtype=torch.float32)
+        
+        return video_tensor, param_tensor
     
-    def load_video(self, video_path: str) -> np.ndarray:
-        """
-        Load MP4 video and return frames.
+    def load_video(self, video_path: str) -> torch.Tensor:
+        """Load MP4, return (1, 60, 64, 64) tensor in [0, 1]."""
+        cap = cv2.VideoCapture(video_path)
+        frames = []
         
-        Args:
-            video_path: Path to MP4 file
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            # Convert to grayscale
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frames.append(gray)
+            
+        cap.release()
         
-        Returns:
-            numpy array of shape (60, 64, 64) with values in [0, 255]
+        # Ensure exactly 60 frames (pad or trim)
+        if len(frames) < 60:
+            # Pad with last frame
+            last_frame = frames[-1] if frames else np.zeros((64,64), dtype=np.uint8)
+            frames += [last_frame] * (60 - len(frames))
+        elif len(frames) > 60:
+            frames = frames[:60]
+            
+        # Stack -> (60, 64, 64)
+        video = np.stack(frames, axis=0)
         
-        TODO:
-        - Open video with cv2.VideoCapture
-        - Read all frames
-        - Ensure exactly 60 frames
-        - Convert to grayscale
-        - Resize to 64×64
-        - Return as numpy array
-        """
-        pass
-    
-    def normalize_video(self, video: np.ndarray) -> torch.Tensor:
-        """
-        Normalize video to [0, 1].
+        # Normalize to [0, 1]
+        video = video.astype(np.float32) / 255.0
         
-        Converts (60, 64, 64) → (1, 60, 64, 64), divides by 255
+        # Add channel dim -> (1, 60, 64, 64)
+        video_tensor = torch.from_numpy(video).unsqueeze(0)
         
-        TODO: Implement
-        """
-        pass
-    
-    def normalize_params(self, params: Dict[str, float]) -> torch.Tensor:
-        """
-        Normalize physics parameters to [0, 1].
-        
-        TODO:
-        - Apply min-max scaling using PARAM_RANGES
-        - Output: tensor of shape (4,) in order [gravity, mass, friction, restitution]
-        """
-        pass
+        return video_tensor
 
-def create_dataloaders(data_dir: str = "data/videos",
-                       metadata_path: str = "data/videos/metadata.json",
-                       batch_size: int = 32,
-                       num_workers: int = 0) -> Dict[str, DataLoader]:
-    """
-    Create train, val, test dataloaders.
+def create_dataloaders(data_dir="data/videos", batch_size=16, val_split=0.2):
+    """Create train/val dataloaders."""
+    dataset = InversePhysicsDataset(
+        video_dir=data_dir,
+        metadata_path=f"{data_dir}/metadata.json"
+    )
     
-    Args:
-        data_dir: Video directory
-        metadata_path: Metadata JSON file
-        batch_size: Batch size for training
-        num_workers: Number of worker processes (0 for Windows)
+    # Split
+    val_size = int(len(dataset) * val_split)
+    train_size = len(dataset) - val_size
     
-    Returns:
-        Dict with keys 'train', 'val', 'test' containing DataLoaders
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        dataset, [train_size, val_size]
+    )
     
-    TODO:
-    - Create InversePhysicsDataset for each split
-    - Create DataLoader for each
-    - Set shuffle=True for train, shuffle=False for val/test
-    - Return dict of dataloaders
-    """
-    pass
-
-def validate_dataloader(dataloader: DataLoader, num_batches: int = 2):
-    """
-    Check that dataloader returns correct shapes and values.
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
-    TODO:
-    - Iterate through num_batches
-    - Check video shape: (B, 1, 60, 64, 64)
-    - Check video values in [0, 1]
-    - Check param shape: (B, 4)
-    - Check param values in [0, 1]
-    - Print sample info
-    """
-    print("[validate_dataloader] Checking batch shapes and values...")
-    
-    for batch_idx, (videos, params) in enumerate(dataloader):
-        if batch_idx >= num_batches:
-            break
-        
-        print(f"\nBatch {batch_idx}:")
-        print(f"  Videos shape: {videos.shape}")
-        print(f"  Params shape: {params.shape}")
-        # TODO: Add more validation checks
+    return {'train': train_loader, 'val': val_loader}
 
 if __name__ == "__main__":
-    print("[dataloader.py] Testing DataLoader...")
+    # Test
+    loaders = create_dataloaders(batch_size=4)
+    train_loader = loaders['train']
     
-    # This will fail until you generate the dataset, but it's here for testing
-    # try:
-    #     loaders = create_dataloaders(batch_size=32)
-    #     validate_dataloader(loaders['train'])
-    # except Exception as e:
-    #     print(f"Error: {e}")
-    #     print("(This is expected if dataset hasn't been generated yet)")
+    print(f"Train batches: {len(train_loader)}")
+    
+    # Get one batch
+    videos, params = next(iter(train_loader))
+    print(f"Batch videos shape: {videos.shape}")
+    print(f"Batch params shape: {params.shape}")
+    print(f"Video range: {videos.min():.2f} - {videos.max():.2f}")
+    
+    assert videos.shape == (4, 1, 60, 64, 64)
+    assert params.shape == (4, 4)
+    print("✓ DataLoader working!")
