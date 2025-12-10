@@ -4,7 +4,7 @@ Predicting physics parameters from video using deep learning
 python -m dataset.generate_dataset
 
 # 2) Train model
-python -m training.train --epochs 20 --batch_size 32 --lr 1e-3
+python -m training.train --epochs 50 --batch_size 32 --lr 5e-4
 
 # 3) Evaluate model
 python -m evaluation.evaluate
